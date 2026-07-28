@@ -1,170 +1,228 @@
 import streamlit as st
 import tempfile
 import os
-from langchain_community.document_loaders import PyPDFLoader
+import time
+
+from langchain_community.document_loaders import UnstructuredFileLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
 from langchain_ollama import OllamaEmbeddings, OllamaLLM
 from langchain_classic.chains.question_answering import load_qa_chain
+from langchain_community.retrievers import BM25Retriever
 
-# 1. Page Configuration
+# FIXED IMPORT: Using langchain_classic for the EnsembleRetriever
+from langchain_classic.retrievers import EnsembleRetriever
+
 st.set_page_config(
-    page_title="Enterprise PDF Assistant",
-    page_icon="💼",
-    layout="wide"
+    page_title="Omni-Data Hybrid Engine", 
+    page_icon="⚡", 
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-# 2. Custom CSS Injection for Modern UI Styling
+# Advanced Custom CSS for a professional, tech-expert UI
 st.markdown("""
 <style>
-    /* Hide Streamlit default branding */
+    /* Hide standard Streamlit header and footer for a clean app look */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     header {visibility: hidden;}
-    
-    /* Make the chat input box float nicely with a modern shadow */
-    .stChatInput {
-        border-radius: 20px !important;
-        box-shadow: 0px 4px 15px rgba(0, 0, 0, 0.2);
+
+    /* Professional Dark Theme Adjustments */
+    .stApp {
+        background-color: #0E1117;
+        color: #FAFAFA;
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+
+    /* Floating, sleek chat input box */
+    .stChatInput { 
+        border-radius: 12px !important; 
+        border: 1px solid #333 !important;
+        box-shadow: 0px 8px 24px rgba(0, 0, 0, 0.4) !important; 
+        background-color: #161B22 !important;
+    }
+
+    /* Sidebar styling: subtle borders and tech-focused look */
+    [data-testid="stSidebar"] { 
+        border-right: 1px solid #30363D; 
+        background-color: #010409;
+    }
+
+    /* Glowing dropzone for file uploads */
+    [data-testid="stFileUploadDropzone"] { 
+        border: 2px dashed #58A6FF; 
+        border-radius: 12px; 
+        background-color: rgba(88, 166, 255, 0.05); 
+        transition: all 0.3s ease;
+    }
+    [data-testid="stFileUploadDropzone"]:hover {
+        background-color: rgba(88, 166, 255, 0.15);
+        border: 2px dashed #79C0FF;
+    }
+
+    /* Styling for the Source Verification expanders */
+    .streamlit-expanderHeader { 
+        background-color: #161B22 !important; 
+        border-radius: 8px !important; 
+        font-size: 0.9rem !important;
+        color: #8B949E !important;
+        border: 1px solid #30363D !important;
     }
     
-    /* Subtle border for sidebar */
-    [data-testid="stSidebar"] {
-        border-right: 1px solid #333;
+    /* Custom Scrollbar for a premium feel */
+    ::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
     }
-    
-    /* Styled file drag-and-drop box */
-    [data-testid="stFileUploadDropzone"] {
-        border: 2px dashed #636EFA;
-        border-radius: 15px;
-        background-color: rgba(99, 110, 250, 0.05);
+    ::-webkit-scrollbar-track {
+        background: #0E1117; 
     }
-    
-    /* Expandable source dropdown styling */
-    .streamlit-expanderHeader {
-        background-color: #1E1E24;
-        border-radius: 10px;
+    ::-webkit-scrollbar-thumb {
+        background: #30363D; 
+        border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+        background: #58A6FF; 
     }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("💼 Enterprise Local PDF Assistant")
-st.caption("Secure, offline AI intelligence with interactive follow-up suggestions.")
-
-# 3. Sidebar Control Panel
 with st.sidebar:
-    st.header("⚙️ Document & Controls")
-    uploaded_file = st.file_uploader("Upload PDF Document", type="pdf")
+    st.markdown("### ⚡ Omni-Data Engine")
+    st.caption("Hybrid RAG Architecture (BM25 + Vector)")
+    st.divider()
+    
+    st.markdown("#### 📂 Data Ingestion")
+    uploaded_file = st.file_uploader(
+        "Upload Unstructured Data", 
+        type=["pdf", "docx", "xlsx", "txt"],
+        help="Supports PDF, Word, Excel, and Text files via Unstructured OCR."
+    )
     
     st.divider()
     
-    # Button to clear chat history
-    if st.button("🧹 Clear Chat History", use_container_width=True):
+    st.markdown("#### ⚙️ System Controls")
+    if st.button("🧹 Flush Memory & Reset", use_container_width=True):
         st.session_state.messages = []
         st.rerun()
+        
+    st.markdown("---")
+    st.caption("Model: Llama-3.2-3B")
+    st.caption("Embeddings: nomic-embed-text")
 
-# 4. Initialize Interactive Chat Session State
 if "messages" not in st.session_state:
-    st.session_state.messages = []
+    st.session_state.messages = [
+        {"role": "assistant", "content": "Welcome to the Omni-Data Hybrid Engine. Please upload a dataset in the sidebar to begin our session.", "sources": []}
+    ]
 
-# 5. Display Existing Chat History
+# Render existing chat history
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
-        # Display source citations if attached to the message
         if "sources" in message and message["sources"]:
-            with st.expander("📍 View Verification Sources & Page Numbers"):
-                for src in message["sources"]:
-                    st.markdown(f"**Page {src['page']}:**\n_{src['content']}_")
+            with st.expander("🔍 View Retrieved Context (RRF)"):
+                for idx, src in enumerate(message["sources"]):
+                    st.markdown(f"**Chunk {idx+1}:**\n> _{src['content']}_")
 
-# 6. Core Processing & Query Handling
+def stream_response(text):
+    """Simulates a streaming effect for the AI response."""
+    for word in text.split(" "):
+        yield word + " "
+        time.sleep(0.02) # Adjust speed of typing here
+
 if uploaded_file:
-    
-    # Cached PDF Indexing Function with Safety Checks
-    @st.cache_resource(show_spinner="Indexing document into vector database...")
-    def process_pdf(file_bytes, filename):
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tf:
+    @st.cache_resource(show_spinner="⚙️ Ingesting & Indexing Data (BM25 + Chroma)...")
+    def process_document(file_bytes, filename):
+        ext = os.path.splitext(filename)[1]
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tf:
             tf.write(file_bytes)
             file_path = tf.name
 
-        loader = PyPDFLoader(file_path)
-        docs = loader.load()
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        try:
+            # Leverage Unstructured for multi-format and OCR capabilities
+            loader = UnstructuredFileLoader(file_path)
+            docs = loader.load()
+        except Exception as e:
+            # EXPLICIT ERROR CAPTURE: Reveals missing packages like 'poppler' or 'tesseract'
+            return None, f"Parsing Error: {str(e)}"
+
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000, 
+            chunk_overlap=200,
+            separators=["\n\n", "\n", ".", " ", ""]
+        )
         chunks = text_splitter.split_documents(docs)
-        
         os.remove(file_path)
 
-        # Safety Check: Did we actually extract any readable text?
         if not chunks:
-            return None, 0
+            return None, "No readable text found in the document."
 
+        # 1. Semantic Vector Search (ChromaDB)
         embeddings = OllamaEmbeddings(model="nomic-embed-text")
         vector_store = Chroma.from_documents(chunks, embeddings)
-        
-        return vector_store, len(docs)
+        vector_retriever = vector_store.as_retriever(search_kwargs={"k": 3})
 
-    # Process and retrieve vector database
-    vector_store, total_pages = process_pdf(uploaded_file.getvalue(), uploaded_file.name)
+        # 2. Exact Keyword Search (BM25)
+        bm25_retriever = BM25Retriever.from_documents(chunks)
+        bm25_retriever.k = 3
+
+        # 3. Hybrid Search Engine (Ensemble via Reciprocal Rank Fusion)
+        ensemble_retriever = EnsembleRetriever(
+            retrievers=[bm25_retriever, vector_retriever],
+            weights=[0.5, 0.5] # 50% keyword, 50% semantic
+        )
+        
+        return ensemble_retriever, None
+
+    # Execute processing
+    ensemble_retriever, error = process_document(uploaded_file.getvalue(), uploaded_file.name)
     
-    # Handle Scanned/Empty PDFs Gracefully
-    if vector_store is None:
-        st.sidebar.error(f"Error: Could not extract text from **{uploaded_file.name}**. Please ensure it is a text-based PDF, not an image scan.")
+    if error:
+        st.sidebar.error(f"**Ingestion Failed:**\n{error}")
+        st.sidebar.info("💡 Tip: If it says 'tesseract' or 'poppler' is missing, install them on your Windows machine.")
         st.stop()
         
-    st.sidebar.success(f"Ready: **{uploaded_file.name}** ({total_pages} pages)")
+    st.sidebar.success(f"🟢 Active Index: **{uploaded_file.name}**")
 
-    # Interactive Chat Input
-    if query := st.chat_input("Ask a question about your document..."):
-        
-        # Save and display user message
+    if query := st.chat_input("Query the hybrid database..."):
+        # Append and display user query
         st.session_state.messages.append({"role": "user", "content": query})
         with st.chat_message("user"):
             st.markdown(query)
 
-        # Generate Assistant Answer with Follow-Up Prompting
+        # Generate and display assistant response
         with st.chat_message("assistant"):
-            with st.spinner("Analyzing document and generating response..."):
+            with st.spinner("🧠 Querying Hybrid Engine..."):
                 llm = OllamaLLM(model="llama3.2")
                 chain = load_qa_chain(llm, chain_type="stuff")
                 
-                # Retrieve top 3 relevant chunks from ChromaDB
-                matching_docs = vector_store.similarity_search(query, k=3)
+                # Fetch optimal chunks
+                matching_docs = ensemble_retriever.invoke(query)
                 
-                # Instruction to force the AI to ask follow-up questions
+                # Advanced System Prompt for better engagement
                 interactive_query = (
-                    f"{query}\n\n"
-                    "INSTRUCTIONS:\n"
-                    "1. Provide a direct and complete answer based on the context.\n"
-                    "2. At the end of your answer, add a new section starting with '**💡 Suggested Follow-up Questions:**'. "
-                    "In this section, suggest 1 to 2 relevant follow-up questions the user could ask next to explore this topic further."
+                    f"Context: Answer the following question thoroughly based strictly on the provided documents.\n"
+                    f"Question: {query}\n\n"
+                    f"Format your response beautifully using Markdown (bolding, bullet points). "
+                    f"At the very end of your response, add a section called '### 💡 Suggested Follow-up' "
+                    f"and provide one highly analytical follow-up question the user could ask."
                 )
                 
+                # Invoke LLM
                 response = chain.invoke({"input_documents": matching_docs, "question": interactive_query})
                 answer = response["output_text"]
                 
-                st.markdown(answer)
+                # Stream the output for engaging UX
+                st.write_stream(stream_response(answer))
                 
-                # Extract page numbers and content snippets for auditability
-                sources = [
-                    {
-                        "page": doc.metadata.get("page", 0) + 1,
-                        "content": doc.page_content[:250].replace("\n", " ") + "..."
-                    }
-                    for doc in matching_docs
-                ]
+                # Format sources for transparency
+                sources = [{"content": doc.page_content[:300].replace("\n", " ") + "..."} for doc in matching_docs]
                 
-                # Display Expandable Sources Dropdown
                 if sources:
-                    with st.expander("📍 View Verification Sources & Page Numbers"):
-                        for src in sources:
-                            st.markdown(f"**Page {src['page']}:**\n_{src['content']}_")
+                    with st.expander("🔍 View Retrieved Context (RRF)"):
+                        for idx, src in enumerate(sources):
+                            st.markdown(f"**Chunk {idx+1}:**\n> _{src['content']}_")
 
-        # Save assistant response and sources to session state history
-        st.session_state.messages.append({
-            "role": "assistant", 
-            "content": answer, 
-            "sources": sources
-        })
-
-else:
-    st.info("👈 Please upload a PDF document in the sidebar to begin analysis.")
+        # Save to memory
+        st.session_state.messages.append({"role": "assistant", "content": answer, "sources": sources})
